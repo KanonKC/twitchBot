@@ -1,3 +1,3 @@
 rm -rf dist/*
-pyinstaller --noconsole --onefile main.py
+pyinstaller --noconsole --onefile Twich_Bot.py
 echo "✅ Build complete"
