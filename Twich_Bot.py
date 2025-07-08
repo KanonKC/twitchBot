@@ -4,6 +4,34 @@ from tkinter import ttk
 from twitchio.ext import commands
 import asyncio
 import threading
+import requests
+
+class TwitchAPI:
+    def __init__(self, client_id, client_secret, access_token):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.access_token = access_token
+        self.endpoint = "https://api.twitch.tv/helix"
+    
+    def get_broadcaster_subscriptions(self, broadcaster_id, cursor=None):
+        url = f"{self.endpoint}/subscriptions?broadcaster_id={broadcaster_id}&first=100"
+        if cursor:
+            url += f"&after={cursor}"
+        headers = {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {self.access_token}",
+        }
+        response = requests.get(url, headers=headers)
+        return response.json()
+        
+    def get_user(self, login):
+        url = f"{self.endpoint}/users?login={login}"
+        headers = {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {self.access_token}",
+        }
+        response = requests.get(url, headers=headers)
+        return response.json()
 
 class TwitchVoteBot(commands.Bot):
     def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback):
@@ -25,17 +53,49 @@ class TwitchVoteBot(commands.Bot):
         self.vote_running = False
         self.queue_list = []
         self.vote_stopped = False  # Flag to track if voting was stopped manually
+        self.broadcaster_subscriptions_table = {}
+        self.helix = TwitchAPI(
+            client_id="gp762nuuoqcoxypju8c569th9wz7q5",
+            client_secret="abslv2nydym6w2i1kf8db8ug8od4kt",
+            access_token=token
+        )
+        self.channel_id = ""
 
     async def event_ready(self):
-        print(f'Logged in as | {self.nick}')
+        print(f'Logged in as | {self.nick} ({self.connected_channels[0]})')
         if self.connected_channels:
+            try:
+                user_res = self.helix.get_user(self.connected_channels[0].name)
+                self.channel_id = user_res["data"][0]["id"]
+            except Exception as e:
+                print("ไม่สามารถดึงข้อมูลช่องของคุณได้", e)
+
+            try:
+                first_time = True
+                cursor = None
+                while cursor or first_time:
+                    broadcaster_sub_res = self.helix.get_broadcaster_subscriptions(self.channel_id, cursor)
+                    print('broadcaster_sub_res',broadcaster_sub_res)
+                    for sub in broadcaster_sub_res["data"]:
+                        self.broadcaster_subscriptions_table[sub["user_login"]] = sub
+                    if "cursor" in broadcaster_sub_res["pagination"]:
+                        cursor = broadcaster_sub_res["pagination"]["cursor"]
+                    else:
+                        cursor = None
+                    first_time = False
+                    print('cursor',cursor, first_time)
+            except Exception as e:
+                print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
+
             await self.connected_channels[0].send(f"🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
+            print("✅ พร้อมใช้งาน")
         else:
             print("ยังไม่ได้เชื่อมต่อกับช่อง!")
 
     async def event_message(self, message):
         if message.echo:
             return
+        print("Message received", message.content)
         content = message.content.strip().upper()
         user = message.author.name
 
@@ -107,11 +167,40 @@ class TwitchVoteBot(commands.Bot):
             print("ไม่สามารถส่งข้อความได้ เนื่องจากยังไม่มีการเชื่อมต่อกับช่อง")
 
     def save_results_to_file(self, result):
+        # This file generate user, choice, subscription sort by time
         file_path = "vote_results.txt"
         with open(file_path, "w", encoding="utf-8") as file:
-            file.write("Vote Results:\n")
             for user, choice in result:  # รับผลโหวตในรูปแบบ tuple
-                file.write(f"{user} voted for {choice}\n")
+                subscription = self.get_subscription(user)
+                match subscription:
+                    case "1000":
+                        subscription = "T1"
+                    case "2000":
+                        subscription = "T2"
+                    case "3000":
+                        subscription = "T3"
+                    case "0000":
+                        subscription = "None"
+                file.write(f"{user},{choice},{subscription}\n")
+                if subscription != "None":
+                    file.write(f"{user},{choice},{subscription}\n")
+        print(f"Results saved to {file_path}")
+
+        # This file generate only username group by choice
+        file_path = "vote_results_choice_seperated.txt"
+        group_by_choice = {}
+        for user, choice in result:
+            if choice not in group_by_choice:
+                group_by_choice[choice] = []
+            group_by_choice[choice].append(user)
+            if self.get_subscription(user) != "0000":
+                group_by_choice[choice].append(user)
+        with open(file_path, "w", encoding="utf-8") as file:
+            for choice, users in group_by_choice.items():
+                file.write(f"------------- Choice: {choice} -------------\n")
+                file.write('\n'.join(users))
+                file.write('\n')
+            
         print(f"Results saved to {file_path}")
 
     def stop_vote(self):
@@ -120,6 +209,11 @@ class TwitchVoteBot(commands.Bot):
         self.send_twitch_message("⏹️ โหวตถูกหยุดแล้ว!")
         self.save_results_to_file(self.votes)  # Save the results when stop vote is clicked
         self.finish_vote()  # Finish vote after stopping
+
+    def get_subscription(self, user):
+        if user in self.broadcaster_subscriptions_table:
+            return self.broadcaster_subscriptions_table[user]["tier"]
+        return "0000"
 
 class App:
     def __init__(self, root):
@@ -159,7 +253,7 @@ class App:
         tk.Label(form_frame, text="Vote Time (seconds):", fg="white", bg="#2e2e2e").grid(row=4, column=0, sticky="w")
         self.time_entry = tk.Entry(form_frame, width=10)
         self.time_entry.grid(row=4, column=1, padx=10, pady=5, sticky="w")
-
+    
         self.countdown_label = tk.Label(root, text="Countdown: 0", font=("Arial", 16), fg="white", bg="#2e2e2e")
         self.countdown_label.pack(pady=10)
 
@@ -181,12 +275,16 @@ class App:
 
         # --- Vote Result Table ---
         tk.Label(root, text="Vote Results", font=("Arial", 14), fg="white", bg="#2e2e2e").pack(pady=(20, 5))
-        self.result_table = ttk.Treeview(root, columns=("No", "Username", "Choice"), show="headings")
+        self.result_table = ttk.Treeview(root, columns=("No", "Username","Subscription", "Choice"), show="headings")
+        # Heading
         self.result_table.heading("No", text="No.")
         self.result_table.heading("Username", text="Username")
+        self.result_table.heading("Subscription", text="Subscription")
         self.result_table.heading("Choice", text="Choice")
+        # Column
         self.result_table.column("No", width=50, anchor="center")
         self.result_table.column("Username", width=150)
+        self.result_table.column("Subscription", width=50, anchor="center")
         self.result_table.column("Choice", width=150)
         self.result_table.pack(pady=5)
 
@@ -279,8 +377,22 @@ class App:
 
     def finish_vote(self, result):
         self.result_table.delete(*self.result_table.get_children())
+        diff = 0
         for idx, (user, choice) in enumerate(result, start=1):
-            self.result_table.insert("", "end", values=(idx, user, choice))
+            subscription = self.bot.get_subscription(user)
+            match subscription:
+                case "1000":
+                    subscription = "Tier 1"
+                case "2000":
+                    subscription = "Tier 2"
+                case "3000":
+                    subscription = "Tier 3"
+                case "0000":
+                    subscription = "-"
+            self.result_table.insert("", "end", values=(idx + diff, user, subscription, choice))
+            if subscription != "-":
+                diff += 1
+                self.result_table.insert("", "end", values=(idx + diff, user, subscription, choice))
 
     def update_queue(self, queue_list):
         self.queue_table.delete(*self.queue_table.get_children())
