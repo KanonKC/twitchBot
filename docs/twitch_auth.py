@@ -19,7 +19,7 @@ class TwitchAuth:
         url = f"{self.auth_endpoint}/device"
         data = {
             "client_id": self.client_id,
-            "scope": "channel:read:subscriptions channel:read:redemptions channel:manage:redemptions"
+            "scope": "channel:read:subscriptions"
         }
         
         response = requests.post(url, data=data)
@@ -35,7 +35,7 @@ class TwitchAuth:
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "device_code": device_code,
-            "grant_type": "device_code"
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
         }
         
         while True:
@@ -47,12 +47,12 @@ class TwitchAuth:
                 return token_data
             elif response.status_code == 400:
                 error_data = response.json()
-                if error_data.get("error") == "authorization_pending":
+                if error_data.get("message") == "authorization_pending":
                     time.sleep(interval)
                     continue
-                elif error_data.get("error") == "authorization_declined":
+                elif error_data.get("message") == "authorization_declined":
                     raise Exception("ผู้ใช้ปฏิเสธการอนุญาต")
-                elif error_data.get("error") == "expired_token":
+                elif error_data.get("message") == "expired_token":
                     raise Exception("Device code หมดอายุแล้ว")
                 else:
                     raise Exception(f"เกิดข้อผิดพลาด: {error_data}")
@@ -246,8 +246,8 @@ if __name__ == "__main__":
     
     # สร้าง TwitchAuth instance
     twitch_auth = TwitchAuth(
-        client_id="gp762nuuoqcoxypju8c569th9wz7q5",
-        client_secret="abslv2nydym6w2i1kf8db8ug8od4kt"
+        client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
+        client_secret="d96t22p7i41bjcrvli5mylw2rybpfq"
     )
     
     # ทดสอบการล็อกอิน
