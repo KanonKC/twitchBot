@@ -7,6 +7,48 @@ import threading
 import requests
 import webbrowser
 import time
+import random
+import json
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib.parse
+import socket
+
+class CallbackHandler(BaseHTTPRequestHandler):
+    def __init__(self, *args, callback_queue=None, **kwargs):
+        self.callback_queue = callback_queue
+        super().__init__(*args, **kwargs)
+    
+    def do_GET(self):
+        """Handle callback from Twitch OAuth"""
+        if self.path.startswith('/callback'):
+            # Parse query parameters
+            query = self.path.split('?')[1] if '?' in self.path else ''
+            params = urllib.parse.parse_qs(query)
+            
+            # Send data back to main thread
+            if self.callback_queue:
+                self.callback_queue.put(params)
+            
+            # Send response back to browser
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            
+            html_content = """
+            <html>
+            <head><title>Twitch Auth Success</title></head>
+            <body>
+                <h1>✅ Authorization successful!</h1>
+                <p>You can close this window now</p>
+                <script>window.close();</script>
+            </body>
+            </html>
+            """
+            self.wfile.write(html_content.encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 class TwitchAuth:
     def __init__(self, client_id, client_secret):
@@ -16,95 +58,155 @@ class TwitchAuth:
         self.api_endpoint = "https://api.twitch.tv/helix"
         self.access_token = None
         self.refresh_token = None
-        
-    def get_device_code(self):
-        """ขอ device code จาก Twitch"""
-        url = f"{self.auth_endpoint}/device"
-        data = {
-            "client_id": self.client_id,
-            "scope": "channel:read:subscriptions"
-        }
-        
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"ไม่สามารถขอ device code ได้: {response.text}")
+        self.scopes = ["channel:read:subscriptions", "chat:read", "chat:edit"]
+        self.redirect_uri = "http://localhost:8080/callback"
+        self.expected_state = None
+        self.callback_queue = None
+
+    def generate_random_string(self, length=10):
+        pool = "abcdefghijklmnopqrstuvwxyz0123456789"
+        return ''.join(random.choices(pool, k=length))
     
-    def poll_for_token(self, device_code, interval=5):
-        """รอการยืนยันจากผู้ใช้และขอ access token"""
-        url = f"{self.auth_endpoint}/token"
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "device_code": device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-        }
-        
-        while True:
-            response = requests.post(url, data=data)
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data["access_token"]
-                self.refresh_token = token_data.get("refresh_token")
-                return token_data
-            elif response.status_code == 400:
-                error_data = response.json()
-                if error_data.get("message") == "authorization_pending":
-                    time.sleep(interval)
-                    continue
-                elif error_data.get("message") == "authorization_declined":
-                    raise Exception("ผู้ใช้ปฏิเสธการอนุญาต")
-                elif error_data.get("message") == "expired_token":
-                    raise Exception("Device code หมดอายุแล้ว")
-                else:
-                    raise Exception(f"เกิดข้อผิดพลาด: {error_data}")
-            else:
-                raise Exception(f"ไม่สามารถขอ token ได้: {response.text}")
+    def find_free_port(self):
+        """Find available port"""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+        return port
     
-    def refresh_access_token(self):
-        """ใช้ refresh token เพื่อขอ access token ใหม่"""
-        if not self.refresh_token:
-            raise Exception("ไม่มี refresh token")
+    def get_implicit_grant_url(self):
+        """Create URL for Implicit Grant Flow"""
+        self.expected_state = self.generate_random_string(32)
+        scopes = " ".join(self.scopes).replace(" ", "%20").replace(":", "%3A")
+        return f"{self.auth_endpoint}/authorize?client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={scopes}&state={self.expected_state}&response_type=token"
+    
+    def start_callback_server(self):
+        print("start_callback_server")
+        """Start web server to receive callback"""
+        port = 8080
+        try:
+            # Create custom handler with callback_queue
+            handler = type('CustomHandler', (BaseHTTPRequestHandler,), {
+                'do_GET': lambda self: self.handle_callback()
+            })
             
-        url = f"{self.auth_endpoint}/token"
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "refresh_token": self.refresh_token,
-            "grant_type": "refresh_token"
-        }
-        
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            token_data = response.json()
-            self.access_token = token_data["access_token"]
-            self.refresh_token = token_data.get("refresh_token", self.refresh_token)
-            return token_data
-        else:
-            raise Exception(f"ไม่สามารถ refresh token ได้: {response.text}")
+            def handle_callback(self):
+                print("Self ", self.fragment)
+                # TODO: Get fragment
+                if self.path.startswith('/callback'):
+                    print("self.path", self.path)
+                    # Parse fragment parameters (access_token is in fragment)
+                    if '#' in self.path:
+                        fragment = self.path.split('#')[1]
+                        params = urllib.parse.parse_qs(fragment)
+                        
+                        # Check state
+                        state = params.get('state', [None])[0]
+                        if state != self.expected_state:
+                            self.send_error(400, "State mismatch")
+                            return
+                        
+                        # Get access token
+                        access_token = params.get('access_token', [None])[0]
+                        if access_token:
+                            self.access_token = access_token
+                            if self.callback_queue:
+                                self.callback_queue.put({
+                                    'access_token': access_token,
+                                    'scope': params.get('scope', [''])[0],
+                                    'token_type': params.get('token_type', ['bearer'])[0]
+                                })
+                        
+                        # Send response back
+                        self.send_response(200)
+                        self.send_header('Content-type', 'text/html')
+                        self.end_headers()
+                        
+                        html_content = """
+                        <html>
+                        <head><title>Twitch Auth Success</title></head>
+                        <body>
+                            <h1>✅ Authorization successful!</h1>
+                            <p>You can close this window now</p>
+                            <script>window.close();</script>
+                        </body>
+                        </html>
+                        """
+                        self.wfile.write(html_content.encode())
+                    else:
+                        self.send_error(400, "Access token not found")
+                else:
+                    self.send_error(404, "Not Found")
+            
+            # Set method for handler
+            handler.do_GET = handle_callback
+            
+            # Start server
+            server = HTTPServer(('localhost', port), handler)
+            server.callback_queue = self.callback_queue
+            server.expected_state = self.expected_state
+            server.access_token = None
+            
+            return server
+        except Exception as e:
+            print(f"Cannot start server: {e}")
+            return None
     
-    # def save_tokens(self, filename="tokens.json"):
-    #     """บันทึก tokens ลงไฟล์"""
-    #     token_data = {
-    #         "access_token": self.access_token,
-    #         "refresh_token": self.refresh_token
-    #     }
-    #     with open(filename, "w") as f:
-    #         json.dump(token_data, f)
-    
-    # def load_tokens(self, filename="tokens.json"):
-    #     """โหลด tokens จากไฟล์"""
-    #     if os.path.exists(filename):
-    #         with open(filename, "r") as f:
-    #             token_data = json.load(f)
-    #             self.access_token = token_data.get("access_token")
-    #             self.refresh_token = token_data.get("refresh_token")
-    #             return True
-    #     return False
-    
+    def login_with_implicit_grant(self):
+        """Login with Implicit Grant Flow"""
+        try:
+            # Create queue to receive data from callback
+            import queue
+            self.callback_queue = queue.Queue()
+            
+            # Start callback server
+            server = self.start_callback_server()
+            if not server:
+                raise Exception("Cannot start callback server")
+            
+            # Start server in separate thread
+            server_thread = threading.Thread(target=server.serve_forever)
+            server_thread.daemon = True
+            server_thread.start()
+            
+            # Create authorization URL
+            auth_url = self.get_implicit_grant_url()
+            print(f" Authorization URL: {auth_url}")
+            
+            # Open browser
+            webbrowser.open(auth_url)
+            
+            # Wait for callback
+            print("⏳ Waiting for user authorization...")
+            try:
+                callback_data = self.callback_queue.get(timeout=300)  # Wait 5 minutes
+                
+                # Get access token
+                if 'access_token' in callback_data:
+                    self.access_token = callback_data['access_token']
+                    print("✅ Received access token!")
+                    return {
+                        'access_token': callback_data['access_token'],
+                        'scope': callback_data.get('scope', ''),
+                        'token_type': callback_data.get('token_type', 'bearer')
+                    }
+                else:
+                    raise Exception("Access token not received")
+                    
+            except queue.Empty:
+                raise Exception("Authorization timeout")
+            finally:
+                # Close server
+                server.shutdown()
+                server.server_close()
+                
+        except Exception as e:
+            print(f"❌ Login failed: {str(e)}")
+            raise e
+
     def validate_token(self):
-        """ตรวจสอบว่า token ยังใช้งานได้หรือไม่"""
+        """Check if token is still valid"""
         if not self.access_token:
             return False
             
@@ -175,7 +277,7 @@ class TwitchVoteBot(commands.Bot):
         self.broadcaster_subscriptions_table = {}
         self.helix = TwitchAPI(
             client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
+            client_secret="a116vy2diw00h67d9wh5yb64ocf43n",
             access_token=token
         )
         self.channel_id = ""
@@ -187,7 +289,7 @@ class TwitchVoteBot(commands.Bot):
                 user_res = self.helix.get_user(self.connected_channels[0].name)
                 self.channel_id = user_res["data"][0]["id"]
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลช่องของคุณได้", e)
+                print("Cannot get channel data", e)
 
             try:
                 first_time = True
@@ -204,12 +306,12 @@ class TwitchVoteBot(commands.Bot):
                     first_time = False
                     print('cursor',cursor, first_time)
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
+                print("Cannot get channel subscriber data", e)
 
-            await self.connected_channels[0].send(f"🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
-            print("✅ พร้อมใช้งาน")
+            await self.connected_channels[0].send(f"🔐 Computer is locked! Please contact to unlock!")
+            print("✅ Ready to use")
         else:
-            print("ยังไม่ได้เชื่อมต่อกับช่อง!")
+            print("Not connected to channel!")
 
     async def event_message(self, message):
         if message.echo:
@@ -218,27 +320,27 @@ class TwitchVoteBot(commands.Bot):
         content = message.content.strip().upper()
         user = message.author.name
 
-        # โหวต: บันทึกการโหวตเฉพาะเมื่อโหวตระหว่างที่กำลังรันโหวต
+        # Vote: Record votes only when voting is running
         if self.vote_running and content in self.vote_choices:
             if user not in self.voted_users:
                 self.voted_users.add(user)
                 self.votes[user] = content
-                await message.channel.send(f"{user} เลือก {content} แล้ว!")
+                await message.channel.send(f"{user} chose {content}!")
 
-        # คิว: เพิ่มหรือเอาผู้ใช้จากคิว
+        # Queue: Add or remove users from queue
         if content in self.queue_keywords:
             if user not in self.queue_list:
                 self.queue_list.append(user)
                 self.update_queue_callback(self.queue_list)
-                await message.channel.send(f"{user} เข้าคิวแล้ว!")  # ส่งข้อความว่าเข้าคิวแล้ว
+                await message.channel.send(f"{user} joined the queue!")  # Send message that joined queue
             else:
-                await message.channel.send(f"{user} ไปต่อแถวใหม่ไป๊!.")  # แจ้งว่าผู้ใช้ในคิวแล้ว
+                await message.channel.send(f"{user} go to the back of the line!")  # Notify that user is already in queue
 
         if content == "!QUEUE":
             if self.queue_list:
-                queue_message = "รายชื่อในคิว:\n" + "\n".join(f"{idx+1}. {user}" for idx, user in enumerate(self.queue_list[:5]))
+                queue_message = "Queue list:\n" + "\n".join(f"{idx+1}. {user}" for idx, user in enumerate(self.queue_list[:5]))
             else:
-                queue_message = "คิวว่างไม่มีใครอยากเล่นด้วย ว๊ายๆๆ😂"
+                queue_message = "Queue is empty, no one wants to play 😂"
             await message.channel.send(queue_message)
 
     def start_countdown(self):
@@ -251,30 +353,30 @@ class TwitchVoteBot(commands.Bot):
         if self.countdown > 0:
             self.countdown -= 1
             self.update_countdown_callback(self.get_remaining_time())
-            print(f"เวลาถอยหลัง: {self.countdown} วินาที")
+            print(f"Countdown: {self.countdown} seconds")
 
             if self.countdown == 10:
-                self.root.after(0, self.send_twitch_message, f"⏳ เหลือเวลา 10 วินาที!")
+                self.root.after(0, self.send_twitch_message, f"⏳ 10 seconds remaining!")
 
             self.root.after(1000, self.run_countdown)
 
         else:
-            if not self.vote_stopped:  # ส่งข้อความ "หมดเวลาโหวตแล้ว!" ถ้ายังไม่ได้กด stop vote
-                self.send_twitch_message("หมดเวลาโหวตแล้ว!")
+            if not self.vote_stopped:  # Send message "Vote time is up!" if stop vote wasn't clicked
+                self.send_twitch_message("Vote time is up!")
             self.vote_running = False
-            self.finish_vote()  # เรียก finish_vote โดยไม่ส่ง result
+            self.finish_vote()  # Call finish_vote without sending result
 
     def get_remaining_time(self):
         return self.countdown
 
     def finish_vote(self, result=None):
         if result is None:
-            # แปลง dict เป็น list ของ tuple (user, choice)
-            result = list(self.votes.items())  # ใช้ items() ของ dict เพื่อแปลงเป็น tuple
-        self.finish_vote_callback(result)  # ส่งผลโหวตไปที่ finish_vote_callback
+            # Convert dict to list of tuples (user, choice)
+            result = list(self.votes.items())  # Use items() of dict to convert to tuple
+        self.finish_vote_callback(result)  # Send vote results to finish_vote_callback
         self.save_results_to_file(result)
 
-        # รีเซ็ทผลโหวตหลังจากจบ
+        # Reset vote results after finishing
         self.votes.clear()
         self.voted_users.clear()
 
@@ -283,13 +385,13 @@ class TwitchVoteBot(commands.Bot):
         if self.connected_channels:
             asyncio.run_coroutine_threadsafe(self.connected_channels[0].send(message), loop)
         else:
-            print("ไม่สามารถส่งข้อความได้ เนื่องจากยังไม่มีการเชื่อมต่อกับช่อง")
+            print("Cannot send message because not connected to channel")
 
     def save_results_to_file(self, result):
         # This file generate user, choice, subscription sort by time
         file_path = "vote_results.txt"
         with open(file_path, "w", encoding="utf-8") as file:
-            for user, choice in result:  # รับผลโหวตในรูปแบบ tuple
+            for user, choice in result:  # Receive vote results in tuple format
                 subscription = self.get_subscription(user)
                 match subscription:
                     case "1000":
@@ -325,7 +427,7 @@ class TwitchVoteBot(commands.Bot):
     def stop_vote(self):
         self.vote_stopped = True  # Set flag to true when vote is manually stopped
         self.countdown = 0
-        self.send_twitch_message("⏹️ โหวตถูกหยุดแล้ว!")
+        self.send_twitch_message("⏹️ Vote stopped!")
         self.save_results_to_file(self.votes)  # Save the results when stop vote is clicked
         self.finish_vote()  # Finish vote after stopping
 
@@ -339,12 +441,12 @@ class App:
 
         self.twitch_auth = TwitchAuth(
             client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq"
+            client_secret="a116vy2diw00h67d9wh5yb64ocf43n"
         )
 
         self.helix = TwitchAPI(
             client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
+            client_secret="a116vy2diw00h67d9wh5yb64ocf43n",
             access_token=""
         )
 
@@ -395,8 +497,8 @@ class App:
         self.connect_button = tk.Button(button_frame, text="Connect Bot", command=self.connect_bot, bg="#5a5a5a", fg="white")
         self.connect_button.grid(row=0, column=0, padx=5)
         
-        self.connect_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#611a15", fg="white")
-        self.connect_button.grid(row=0, column=1, padx=5)
+        self.login_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#611a15", fg="white")
+        self.login_button.grid(row=0, column=1, padx=5)
 
         self.start_button = tk.Button(button_frame, text="Start Votezzz", command=self.start_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
         self.start_button.grid(row=0, column=2, padx=5)
@@ -453,6 +555,7 @@ class App:
         self.setup_twitch_bot(token, channel)
 
     def setup_twitch_bot(self, token, channel):
+        print("setup_twitch_bot", token, channel)
         self.bot = TwitchVoteBot(
             token=token,
             channel=channel,
@@ -469,36 +572,36 @@ class App:
 
         # Enable buttons after the bot connects
         self.connect_button.config(state=tk.DISABLED)
+        self.login_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.NORMAL)
         self.set_queue_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
 
-        # ส่งข้อความเชื่อมต่อบอท
-        self.bot.send_twitch_message("🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
+        # Send bot connection message
+        self.bot.send_twitch_message("🔐 Computer is locked! Please contact to unlock!")
 
     def login_to_twitch(self):
         try:
-            # ลองโหลด tokens ที่มีอยู่
+            # Try to use existing token
             if self.twitch_auth.access_token and self.twitch_auth.validate_token():
-                print("✅ ใช้ tokens ที่มีอยู่แล้ว")
+                print("✅ Using existing tokens")
+                token = self.twitch_auth.access_token
             else:
-                print("🔄 ขอ tokens ใหม่...")
-                device_data = self.twitch_auth.get_device_code()
-                print(f"รหัสยืนยัน: {device_data['user_code']}")
-                print(f"เว็บไซต์: {device_data['verification_uri']}")
-                webbrowser.open(device_data['verification_uri'])
-                
-                # รอการยืนยัน
-                token_data = self.twitch_auth.poll_for_token(device_data["device_code"], device_data["interval"])
+                print("🔄 Requesting new tokens with Implicit Grant Flow...")
+                token_data = self.twitch_auth.login_with_implicit_grant()
                 token = token_data["access_token"]
-                response = self.helix.get_user_by_token(token)
-                channel = response['data'][0]['login']
-                self.setup_twitch_bot(token,channel)
-                # self.twitch_auth.save_tokens()
-                print("✅ ล็อกอินสำเร็จแล้ว!")
+                print("✅ Login successful!")
+            
+            # Get user data
+            response = self.helix.get_user_by_token(token)
+            channel = response['data'][0]['login']
+            
+            # Setup bot
+            self.setup_twitch_bot(token, channel)
                 
         except Exception as e:
-            print(f"❌ Login to Twitch failed: {str(e)}") 
+            print(f"❌ Login to Twitch failed: {str(e)}")
+            messagebox.showerror("Error", f"Login failed: {str(e)}")
 
     def run_bot(self):
         asyncio.run(self.bot.run())
@@ -512,7 +615,7 @@ class App:
             messagebox.showerror("Error", "Vote time must be an integer.")
             return
 
-        # รีเซ็ทตารางผลโหวตเมื่อเริ่มโหวตใหม่
+        # Reset vote results table when starting new vote
         for row in self.result_table.get_children():
             self.result_table.delete(row)
 
@@ -521,8 +624,8 @@ class App:
         self.bot.duration = duration
         self.bot.start_countdown()
 
-        # ส่งข้อความเริ่มโหวต
-        self.bot.send_twitch_message(f"🚨 เริ่มโหวตแล้ว! พิมพ์ {', '.join(self.bot.vote_choices)} เพื่อเลือก มีเวลา {self.bot.duration} วินาที!")
+        # Send vote start message
+        self.bot.send_twitch_message(f"🚨 Vote started! Type {', '.join(self.bot.vote_choices)} to choose. You have {self.bot.duration} seconds!")
 
     def set_queue_keywords(self):
         queue_keywords = [k.strip().upper() for k in self.queue_keywords_entry.get().split(',') if k.strip()]
