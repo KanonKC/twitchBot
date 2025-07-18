@@ -22,8 +22,8 @@ class TwitchAuth:
         self.access_token = None
         self.refresh_token = None
         self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
-        self.redirect_uri = "http://localhost:8080/callback"
-        self.token_receiver_endpoint = "http://localhost:8080"
+        self.redirect_uri = "https://twitch-token.kanonkc.com/callback"
+        self.token_receiver_endpoint = "https://twitch-token.kanonkc.com"
 
     def get_user_login_url(self):
         state = generate_random_string(16)
@@ -217,7 +217,7 @@ class TwitchVoteBot(commands.Bot):
                 cursor = None
                 while cursor or first_time:
                     broadcaster_sub_res = self.helix.get_broadcaster_subscriptions(self.channel_id, cursor)
-                    print('broadcaster_sub_res',broadcaster_sub_res)
+                    # print('broadcaster_sub_res',broadcaster_sub_res)
                     for sub in broadcaster_sub_res["data"]:
                         self.broadcaster_subscriptions_table[sub["user_login"]] = sub
                     if "cursor" in broadcaster_sub_res["pagination"]:
@@ -225,7 +225,7 @@ class TwitchVoteBot(commands.Bot):
                     else:
                         cursor = None
                     first_time = False
-                    print('cursor',cursor, first_time)
+                    # print('cursor',cursor, first_time)
             except Exception as e:
                 print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
 
