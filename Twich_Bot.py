@@ -7,6 +7,11 @@ import threading
 import requests
 import webbrowser
 import time
+import random
+
+def generate_random_string(length):
+    pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return ''.join(random.choices(pool, k=length))
 
 class TwitchAuth:
     def __init__(self, client_id, client_secret):
@@ -16,6 +21,14 @@ class TwitchAuth:
         self.api_endpoint = "https://api.twitch.tv/helix"
         self.access_token = None
         self.refresh_token = None
+        self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
+        self.redirect_uri = "http://localhost:8080/callback"
+        self.token_receiver_endpoint = "http://localhost:8080"
+
+    def get_user_login_url(self):
+        state = generate_random_string(16)
+        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={'%20'.join(self.scopes)}&state={state}"
+        return { "url": url, "state": state }
         
     def get_device_code(self):
         """ขอ device code จาก Twitch"""
@@ -30,6 +43,16 @@ class TwitchAuth:
             return response.json()
         else:
             raise Exception(f"ไม่สามารถขอ device code ได้: {response.text}")
+    
+    def poll_for_token_from_receiver(self, state, interval=5):
+        url = f"{self.token_receiver_endpoint}/token/{state}"
+        while True:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                time.sleep(interval)
+
     
     def poll_for_token(self, device_code, interval=5):
         """รอการยืนยันจากผู้ใช้และขอ access token"""
@@ -483,13 +506,15 @@ class App:
                 print("✅ ใช้ tokens ที่มีอยู่แล้ว")
             else:
                 print("🔄 ขอ tokens ใหม่...")
-                device_data = self.twitch_auth.get_device_code()
-                print(f"รหัสยืนยัน: {device_data['user_code']}")
-                print(f"เว็บไซต์: {device_data['verification_uri']}")
-                webbrowser.open(device_data['verification_uri'])
+                # device_data = self.twitch_auth.get_device_code()
+                # print(f"รหัสยืนยัน: {device_data['user_code']}")
+                # print(f"เว็บไซต์: {device_data['verification_uri']}")
+                login = self.twitch_auth.get_user_login_url()
+                state = login["state"]
+                webbrowser.open(login["url"])
                 
                 # รอการยืนยัน
-                token_data = self.twitch_auth.poll_for_token(device_data["device_code"], device_data["interval"])
+                token_data = self.twitch_auth.poll_for_token_from_receiver(state)
                 token = token_data["access_token"]
                 response = self.helix.get_user_by_token(token)
                 channel = response['data'][0]['login']
