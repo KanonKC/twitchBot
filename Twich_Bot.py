@@ -418,10 +418,10 @@ class App:
         self.connect_button = tk.Button(button_frame, text="Connect Bot", command=self.connect_bot, bg="#5a5a5a", fg="white")
         self.connect_button.grid(row=0, column=0, padx=5)
         
-        self.connect_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#611a15", fg="white")
-        self.connect_button.grid(row=0, column=1, padx=5)
+        self.login_twitch_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#6441a5", fg="white")
+        self.login_twitch_button.grid(row=0, column=1, padx=5)
 
-        self.start_button = tk.Button(button_frame, text="Start Votezzz", command=self.start_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
+        self.start_button = tk.Button(button_frame, text="Start Vote", command=self.start_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
         self.start_button.grid(row=0, column=2, padx=5)
 
         self.set_queue_button = tk.Button(button_frame, text="Set Queue Keywords", command=self.set_queue_keywords, state=tk.DISABLED, bg="#5a5a5a", fg="white")
@@ -492,6 +492,7 @@ class App:
 
         # Enable buttons after the bot connects
         self.connect_button.config(state=tk.DISABLED)
+        self.login_twitch_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.NORMAL)
         self.set_queue_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
