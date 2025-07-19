@@ -8,6 +8,8 @@ import requests
 import webbrowser
 import time
 import random
+import json
+import os
 
 def generate_random_string(length):
     pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -29,20 +31,6 @@ class TwitchAuth:
         state = generate_random_string(16)
         url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={'%20'.join(self.scopes)}&state={state}"
         return { "url": url, "state": state }
-        
-    def get_device_code(self):
-        """ขอ device code จาก Twitch"""
-        url = f"{self.auth_endpoint}/device"
-        data = {
-            "client_id": self.client_id,
-            "scope": "channel:read:subscriptions"
-        }
-        
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"ไม่สามารถขอ device code ได้: {response.text}")
     
     def poll_for_token_from_receiver(self, state, interval=5):
         url = f"{self.token_receiver_endpoint}/token/{state}"
@@ -53,38 +41,7 @@ class TwitchAuth:
             else:
                 time.sleep(interval)
 
-    
-    def poll_for_token(self, device_code, interval=5):
-        """รอการยืนยันจากผู้ใช้และขอ access token"""
-        url = f"{self.auth_endpoint}/token"
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "device_code": device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-        }
-        
-        while True:
-            response = requests.post(url, data=data)
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data["access_token"]
-                self.refresh_token = token_data.get("refresh_token")
-                return token_data
-            elif response.status_code == 400:
-                error_data = response.json()
-                if error_data.get("message") == "authorization_pending":
-                    time.sleep(interval)
-                    continue
-                elif error_data.get("message") == "authorization_declined":
-                    raise Exception("ผู้ใช้ปฏิเสธการอนุญาต")
-                elif error_data.get("message") == "expired_token":
-                    raise Exception("Device code หมดอายุแล้ว")
-                else:
-                    raise Exception(f"เกิดข้อผิดพลาด: {error_data}")
-            else:
-                raise Exception(f"ไม่สามารถขอ token ได้: {response.text}")
-    
+    # TODO: Implement refresh access token flow
     def refresh_access_token(self):
         """ใช้ refresh token เพื่อขอ access token ใหม่"""
         if not self.refresh_token:
@@ -107,27 +64,24 @@ class TwitchAuth:
         else:
             raise Exception(f"ไม่สามารถ refresh token ได้: {response.text}")
     
-    # def save_tokens(self, filename="tokens.json"):
-    #     """บันทึก tokens ลงไฟล์"""
-    #     token_data = {
-    #         "access_token": self.access_token,
-    #         "refresh_token": self.refresh_token
-    #     }
-    #     with open(filename, "w") as f:
-    #         json.dump(token_data, f)
+    def save_tokens(self, filename="tokens.json"):
+        token_data = {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token
+        }
+        with open(filename, "w") as f:
+            json.dump(token_data, f)
     
-    # def load_tokens(self, filename="tokens.json"):
-    #     """โหลด tokens จากไฟล์"""
-    #     if os.path.exists(filename):
-    #         with open(filename, "r") as f:
-    #             token_data = json.load(f)
-    #             self.access_token = token_data.get("access_token")
-    #             self.refresh_token = token_data.get("refresh_token")
-    #             return True
-    #     return False
+    def load_tokens(self, filename="tokens.json"):
+        if os.path.exists(filename):
+            with open(filename, "r") as f:
+                token_data = json.load(f)
+                self.access_token = token_data.get("access_token")
+                self.refresh_token = token_data.get("refresh_token")
+                return True
+        return False
     
     def validate_token(self):
-        """ตรวจสอบว่า token ยังใช้งานได้หรือไม่"""
         if not self.access_token:
             return False
             
@@ -507,9 +461,6 @@ class App:
                 print("✅ ใช้ tokens ที่มีอยู่แล้ว")
             else:
                 print("🔄 ขอ tokens ใหม่...")
-                # device_data = self.twitch_auth.get_device_code()
-                # print(f"รหัสยืนยัน: {device_data['user_code']}")
-                # print(f"เว็บไซต์: {device_data['verification_uri']}")
                 login = self.twitch_auth.get_user_login_url()
                 state = login["state"]
                 webbrowser.open(login["url"])
