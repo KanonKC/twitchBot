@@ -165,7 +165,7 @@ if os.path.exists("tokens.json"):
 ## ตัวอย่างการใช้งานในโปรเจคเดิม
 
 ```python
-# ใน Twich_Bot.py
+# ใน Twitch_Bot.py
 from twitch_auth import TwitchAuth
 
 class App:
