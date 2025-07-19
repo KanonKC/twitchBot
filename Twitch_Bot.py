@@ -8,13 +8,15 @@ import requests
 import webbrowser
 import time
 import random
+import json
+import os
 
 def generate_random_string(length):
     pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return ''.join(random.choices(pool, k=length))
 
 class TwitchAuth:
-    def __init__(self, client_id, client_secret):
+    def __init__(self, client_id, client_secret, token_receiver_endpoint):
         self.client_id = client_id
         self.client_secret = client_secret
         self.auth_endpoint = "https://id.twitch.tv/oauth2"
@@ -22,27 +24,12 @@ class TwitchAuth:
         self.access_token = None
         self.refresh_token = None
         self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
-        self.redirect_uri = "https://twitch-token.kanonkc.com/callback"
-        self.token_receiver_endpoint = "https://twitch-token.kanonkc.com"
+        self.token_receiver_endpoint = token_receiver_endpoint
 
     def get_user_login_url(self):
         state = generate_random_string(16)
-        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={'%20'.join(self.scopes)}&state={state}"
+        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.token_receiver_endpoint}/callback&scope={'%20'.join(self.scopes)}&state={state}"
         return { "url": url, "state": state }
-        
-    def get_device_code(self):
-        """ขอ device code จาก Twitch"""
-        url = f"{self.auth_endpoint}/device"
-        data = {
-            "client_id": self.client_id,
-            "scope": "channel:read:subscriptions"
-        }
-        
-        response = requests.post(url, data=data)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"ไม่สามารถขอ device code ได้: {response.text}")
     
     def poll_for_token_from_receiver(self, state, interval=5):
         url = f"{self.token_receiver_endpoint}/token/{state}"
@@ -53,42 +40,10 @@ class TwitchAuth:
             else:
                 time.sleep(interval)
 
-    
-    def poll_for_token(self, device_code, interval=5):
-        """รอการยืนยันจากผู้ใช้และขอ access token"""
-        url = f"{self.auth_endpoint}/token"
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "device_code": device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-        }
-        
-        while True:
-            response = requests.post(url, data=data)
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data["access_token"]
-                self.refresh_token = token_data.get("refresh_token")
-                return token_data
-            elif response.status_code == 400:
-                error_data = response.json()
-                if error_data.get("message") == "authorization_pending":
-                    time.sleep(interval)
-                    continue
-                elif error_data.get("message") == "authorization_declined":
-                    raise Exception("ผู้ใช้ปฏิเสธการอนุญาต")
-                elif error_data.get("message") == "expired_token":
-                    raise Exception("Device code หมดอายุแล้ว")
-                else:
-                    raise Exception(f"เกิดข้อผิดพลาด: {error_data}")
-            else:
-                raise Exception(f"ไม่สามารถขอ token ได้: {response.text}")
-    
+    # TODO: Implement refresh access token flow
     def refresh_access_token(self):
-        """ใช้ refresh token เพื่อขอ access token ใหม่"""
         if not self.refresh_token:
-            raise Exception("ไม่มี refresh token")
+            raise Exception("No refresh token")
             
         url = f"{self.auth_endpoint}/token"
         data = {
@@ -105,29 +60,26 @@ class TwitchAuth:
             self.refresh_token = token_data.get("refresh_token", self.refresh_token)
             return token_data
         else:
-            raise Exception(f"ไม่สามารถ refresh token ได้: {response.text}")
+            raise Exception(f"Cannot refresh token: {response.text}")
     
-    # def save_tokens(self, filename="tokens.json"):
-    #     """บันทึก tokens ลงไฟล์"""
-    #     token_data = {
-    #         "access_token": self.access_token,
-    #         "refresh_token": self.refresh_token
-    #     }
-    #     with open(filename, "w") as f:
-    #         json.dump(token_data, f)
+    def save_tokens(self, filename="tokens.json"):
+        token_data = {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token
+        }
+        with open(filename, "w") as f:
+            json.dump(token_data, f)
     
-    # def load_tokens(self, filename="tokens.json"):
-    #     """โหลด tokens จากไฟล์"""
-    #     if os.path.exists(filename):
-    #         with open(filename, "r") as f:
-    #             token_data = json.load(f)
-    #             self.access_token = token_data.get("access_token")
-    #             self.refresh_token = token_data.get("refresh_token")
-    #             return True
-    #     return False
+    def load_tokens(self, filename="tokens.json"):
+        if os.path.exists(filename):
+            with open(filename, "r") as f:
+                token_data = json.load(f)
+                self.access_token = token_data.get("access_token")
+                self.refresh_token = token_data.get("refresh_token")
+                return True
+        return False
     
     def validate_token(self):
-        """ตรวจสอบว่า token ยังใช้งานได้หรือไม่"""
         if not self.access_token:
             return False
             
@@ -145,38 +97,38 @@ class TwitchAPI:
         self.client_secret = client_secret
         self.access_token = access_token
         self.endpoint = "https://api.twitch.tv/helix"
+
+    def set_access_token(self, access_token):
+        self.access_token = access_token
+
+    def get_headers(self, token=""):
+        return {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token if token else self.access_token}",
+        }
     
     def get_broadcaster_subscriptions(self, broadcaster_id, cursor=None):
         url = f"{self.endpoint}/subscriptions?broadcaster_id={broadcaster_id}&first=100"
         if cursor:
             url += f"&after={cursor}"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {self.access_token}",
-        }
+        headers = self.get_headers()
         response = requests.get(url, headers=headers)
         return response.json()
         
     def get_user(self, login):
         url = f"{self.endpoint}/users?login={login}"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {self.access_token}",
-        }
+        headers = self.get_headers()
         response = requests.get(url, headers=headers)
         return response.json()
     
     def get_user_by_token(self, token):
         url = f"{self.endpoint}/users"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {token}",
-        }
+        headers = self.get_headers(token)
         response = requests.get(url, headers=headers)
         return response.json()
 
 class TwitchVoteBot(commands.Bot):
-    def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback):
+    def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback,twitch_api):
         super().__init__(
             token=token,
             prefix='!',
@@ -196,21 +148,17 @@ class TwitchVoteBot(commands.Bot):
         self.queue_list = []
         self.vote_stopped = False  # Flag to track if voting was stopped manually
         self.broadcaster_subscriptions_table = {}
-        self.helix = TwitchAPI(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
-            access_token=token
-        )
+        self.helix = twitch_api
         self.channel_id = ""
 
     async def event_ready(self):
-        print(f'Logged in as | {self.nick} ({self.connected_channels[0]})')
+        
         if self.connected_channels:
             try:
                 user_res = self.helix.get_user(self.connected_channels[0].name)
                 self.channel_id = user_res["data"][0]["id"]
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลช่องของคุณได้", e)
+                print("Cannot retrieve your channel data", e)
 
             try:
                 first_time = True
@@ -227,12 +175,12 @@ class TwitchVoteBot(commands.Bot):
                     first_time = False
                     # print('cursor',cursor, first_time)
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
+                print("Cannot retrieve your channel subscribers data", e)
 
             await self.connected_channels[0].send(f"🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
-            print("✅ พร้อมใช้งาน")
+            print(f"✅ Ready to go! Logged in as | {self.nick} ({self.connected_channels[0]})")
         else:
-            print("ยังไม่ได้เชื่อมต่อกับช่อง!")
+            print("Channel has not been connected yet!")
 
     async def event_message(self, message):
         if message.echo:
@@ -274,7 +222,7 @@ class TwitchVoteBot(commands.Bot):
         if self.countdown > 0:
             self.countdown -= 1
             self.update_countdown_callback(self.get_remaining_time())
-            print(f"เวลาถอยหลัง: {self.countdown} วินาที")
+            # print(f"Countdown: {self.countdown} seconds")
 
             if self.countdown == 10:
                 self.root.after(0, self.send_twitch_message, f"⏳ เหลือเวลา 10 วินาที!")
@@ -285,7 +233,7 @@ class TwitchVoteBot(commands.Bot):
             if not self.vote_stopped:  # ส่งข้อความ "หมดเวลาโหวตแล้ว!" ถ้ายังไม่ได้กด stop vote
                 self.send_twitch_message("หมดเวลาโหวตแล้ว!")
             self.vote_running = False
-            self.finish_vote()  # เรียก finish_vote โดยไม่ส่ง result
+            self.finish_vote()  # Call finish_vote without sending result
 
     def get_remaining_time(self):
         return self.countdown
@@ -306,7 +254,7 @@ class TwitchVoteBot(commands.Bot):
         if self.connected_channels:
             asyncio.run_coroutine_threadsafe(self.connected_channels[0].send(message), loop)
         else:
-            print("ไม่สามารถส่งข้อความได้ เนื่องจากยังไม่มีการเชื่อมต่อกับช่อง")
+            print("Cannot send a message because channel has not been connected yet!")
 
     def save_results_to_file(self, result):
         # This file generate user, choice, subscription sort by time
@@ -360,14 +308,25 @@ class TwitchVoteBot(commands.Bot):
 class App:
     def __init__(self, root):
 
+        # TODO: Make this to environment variables
+        client_id = "y8xpxp0qd5vrzx4yy7tnj71sxkokd1"
+        client_secret = "d96t22p7i41bjcrvli5mylw2rybpfq"
+        token_receiver_endpoint = "https://twitch-token.kanonkc.com"
+        
+        if not client_id or not client_secret or not token_receiver_endpoint:
+            messagebox.showerror("Error", "หากคุณเป็นผู้ใช้งานผละเห็นข้อความนี้ โปรดติดต่อ KanonKC\nกรุณาตั้งค่า TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET และ TWTICH_TOKEN_RECEIVER_ENDPOINT ในไฟล์ .env")
+            root.destroy()
+            return
+
         self.twitch_auth = TwitchAuth(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq"
+            client_id=client_id,
+            client_secret=client_secret,
+            token_receiver_endpoint=token_receiver_endpoint
         )
 
         self.helix = TwitchAPI(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
+            client_id=client_id,
+            client_secret=client_secret,
             access_token=""
         )
 
@@ -476,6 +435,7 @@ class App:
         self.setup_twitch_bot(token, channel)
 
     def setup_twitch_bot(self, token, channel):
+        self.helix.set_access_token(token)
         self.bot = TwitchVoteBot(
             token=token,
             channel=channel,
@@ -485,7 +445,8 @@ class App:
             root=self.root,
             update_countdown_callback=self.update_countdown,
             finish_vote_callback=self.finish_vote,
-            update_queue_callback=self.update_queue
+            update_queue_callback=self.update_queue,
+            twitch_api=self.helix
         )
         self.bot.run_task = threading.Thread(target=self.run_bot)
         self.bot.run_task.start()
@@ -502,26 +463,23 @@ class App:
 
     def login_to_twitch(self):
         try:
-            # ลองโหลด tokens ที่มีอยู่
+            # Try to load existing tokens
             if self.twitch_auth.access_token and self.twitch_auth.validate_token():
-                print("✅ ใช้ tokens ที่มีอยู่แล้ว")
+                print("✅ Using existing tokens")
             else:
-                print("🔄 ขอ tokens ใหม่...")
-                # device_data = self.twitch_auth.get_device_code()
-                # print(f"รหัสยืนยัน: {device_data['user_code']}")
-                # print(f"เว็บไซต์: {device_data['verification_uri']}")
+                print("🔄 Requesting new tokens...")
                 login = self.twitch_auth.get_user_login_url()
                 state = login["state"]
                 webbrowser.open(login["url"])
                 
-                # รอการยืนยัน
+                # Wait for confirmation
                 token_data = self.twitch_auth.poll_for_token_from_receiver(state)
                 token = token_data["access_token"]
                 response = self.helix.get_user_by_token(token)
                 channel = response['data'][0]['login']
                 self.setup_twitch_bot(token,channel)
                 # self.twitch_auth.save_tokens()
-                print("✅ ล็อกอินสำเร็จแล้ว!")
+                print("✅ Login successful!")
                 
         except Exception as e:
             print(f"❌ Login to Twitch failed: {str(e)}") 
@@ -538,7 +496,7 @@ class App:
             messagebox.showerror("Error", "Vote time must be an integer.")
             return
 
-        # รีเซ็ทตารางผลโหวตเมื่อเริ่มโหวตใหม่
+        # Reset vote results table when starting new vote
         for row in self.result_table.get_children():
             self.result_table.delete(row)
 
