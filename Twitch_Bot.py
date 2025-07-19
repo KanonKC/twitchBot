@@ -1,0 +1,561 @@
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import ttk
+from twitchio.ext import commands
+import asyncio
+import threading
+import requests
+import webbrowser
+import time
+import random
+import json
+import os
+
+def generate_random_string(length):
+    pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return ''.join(random.choices(pool, k=length))
+
+class TwitchAuth:
+    def __init__(self, client_id, client_secret, token_receiver_endpoint):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.auth_endpoint = "https://id.twitch.tv/oauth2"
+        self.api_endpoint = "https://api.twitch.tv/helix"
+        self.access_token = None
+        self.refresh_token = None
+        self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
+        self.token_receiver_endpoint = token_receiver_endpoint
+
+    def get_user_login_url(self):
+        state = generate_random_string(16)
+        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.token_receiver_endpoint}/callback&scope={'%20'.join(self.scopes)}&state={state}"
+        return { "url": url, "state": state }
+    
+    def poll_for_token_from_receiver(self, state, interval=5):
+        url = f"{self.token_receiver_endpoint}/token/{state}"
+        while True:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                time.sleep(interval)
+
+    # TODO: Implement refresh access token flow
+    def refresh_access_token(self):
+        if not self.refresh_token:
+            raise Exception("No refresh token")
+            
+        url = f"{self.auth_endpoint}/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "refresh_token": self.refresh_token,
+            "grant_type": "refresh_token"
+        }
+        
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            token_data = response.json()
+            self.access_token = token_data["access_token"]
+            self.refresh_token = token_data.get("refresh_token", self.refresh_token)
+            return token_data
+        else:
+            raise Exception(f"Cannot refresh token: {response.text}")
+    
+    def save_tokens(self, filename="tokens.json"):
+        token_data = {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token
+        }
+        with open(filename, "w") as f:
+            json.dump(token_data, f)
+    
+    def load_tokens(self, filename="tokens.json"):
+        if os.path.exists(filename):
+            with open(filename, "r") as f:
+                token_data = json.load(f)
+                self.access_token = token_data.get("access_token")
+                self.refresh_token = token_data.get("refresh_token")
+                return True
+        return False
+    
+    def validate_token(self):
+        if not self.access_token:
+            return False
+            
+        url = f"{self.auth_endpoint}/validate"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        response = requests.get(url, headers=headers)
+        return response.status_code == 200
+
+class TwitchAPI:
+    def __init__(self, client_id="", client_secret="", access_token=""):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.access_token = access_token
+        self.endpoint = "https://api.twitch.tv/helix"
+
+    def set_access_token(self, access_token):
+        self.access_token = access_token
+
+    def get_headers(self, token=""):
+        return {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token if token else self.access_token}",
+        }
+    
+    def get_broadcaster_subscriptions(self, broadcaster_id, cursor=None):
+        url = f"{self.endpoint}/subscriptions?broadcaster_id={broadcaster_id}&first=100"
+        if cursor:
+            url += f"&after={cursor}"
+        headers = self.get_headers()
+        response = requests.get(url, headers=headers)
+        return response.json()
+        
+    def get_user(self, login):
+        url = f"{self.endpoint}/users?login={login}"
+        headers = self.get_headers()
+        response = requests.get(url, headers=headers)
+        return response.json()
+    
+    def get_user_by_token(self, token):
+        url = f"{self.endpoint}/users"
+        headers = self.get_headers(token)
+        response = requests.get(url, headers=headers)
+        return response.json()
+
+class TwitchVoteBot(commands.Bot):
+    def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback,twitch_api):
+        super().__init__(
+            token=token,
+            prefix='!',
+            initial_channels=[channel]
+        )
+        self.vote_choices = vote_choices
+        self.queue_keywords = queue_keywords
+        self.votes = {}
+        self.duration = duration
+        self.countdown = duration
+        self.root = root
+        self.update_countdown_callback = update_countdown_callback
+        self.finish_vote_callback = finish_vote_callback
+        self.update_queue_callback = update_queue_callback
+        self.voted_users = set()
+        self.vote_running = False
+        self.queue_list = []
+        self.vote_stopped = False  # Flag to track if voting was stopped manually
+        self.broadcaster_subscriptions_table = {}
+        self.helix = twitch_api
+        self.channel_id = ""
+
+    async def event_ready(self):
+        
+        if self.connected_channels:
+            try:
+                user_res = self.helix.get_user(self.connected_channels[0].name)
+                self.channel_id = user_res["data"][0]["id"]
+            except Exception as e:
+                print("Cannot retrieve your channel data", e)
+
+            try:
+                first_time = True
+                cursor = None
+                while cursor or first_time:
+                    broadcaster_sub_res = self.helix.get_broadcaster_subscriptions(self.channel_id, cursor)
+                    # print('broadcaster_sub_res',broadcaster_sub_res)
+                    for sub in broadcaster_sub_res["data"]:
+                        self.broadcaster_subscriptions_table[sub["user_login"]] = sub
+                    if "cursor" in broadcaster_sub_res["pagination"]:
+                        cursor = broadcaster_sub_res["pagination"]["cursor"]
+                    else:
+                        cursor = None
+                    first_time = False
+                    # print('cursor',cursor, first_time)
+            except Exception as e:
+                print("Cannot retrieve your channel subscribers data", e)
+
+            await self.connected_channels[0].send(f"🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
+            print(f"✅ Ready to go! Logged in as | {self.nick} ({self.connected_channels[0]})")
+        else:
+            print("Channel has not been connected yet!")
+
+    async def event_message(self, message):
+        if message.echo:
+            return
+        print("Message received", message.content)
+        content = message.content.strip().upper()
+        user = message.author.name
+
+        # โหวต: บันทึกการโหวตเฉพาะเมื่อโหวตระหว่างที่กำลังรันโหวต
+        if self.vote_running and content in self.vote_choices:
+            if user not in self.voted_users:
+                self.voted_users.add(user)
+                self.votes[user] = content
+                await message.channel.send(f"{user} เลือก {content} แล้ว!")
+
+        # คิว: เพิ่มหรือเอาผู้ใช้จากคิว
+        if content in self.queue_keywords:
+            if user not in self.queue_list:
+                self.queue_list.append(user)
+                self.update_queue_callback(self.queue_list)
+                await message.channel.send(f"{user} เข้าคิวแล้ว!")  # ส่งข้อความว่าเข้าคิวแล้ว
+            else:
+                await message.channel.send(f"{user} ไปต่อแถวใหม่ไป๊!.")  # แจ้งว่าผู้ใช้ในคิวแล้ว
+
+        if content == "!QUEUE":
+            if self.queue_list:
+                queue_message = "รายชื่อในคิว:\n" + "\n".join(f"{idx+1}. {user}" for idx, user in enumerate(self.queue_list[:5]))
+            else:
+                queue_message = "คิวว่างไม่มีใครอยากเล่นด้วย ว๊ายๆๆ😂"
+            await message.channel.send(queue_message)
+
+    def start_countdown(self):
+        self.vote_running = True
+        self.countdown = self.duration
+        self.update_countdown_callback(self.get_remaining_time())
+        self.run_countdown()
+
+    def run_countdown(self):
+        if self.countdown > 0:
+            self.countdown -= 1
+            self.update_countdown_callback(self.get_remaining_time())
+            # print(f"Countdown: {self.countdown} seconds")
+
+            if self.countdown == 10:
+                self.root.after(0, self.send_twitch_message, f"⏳ เหลือเวลา 10 วินาที!")
+
+            self.root.after(1000, self.run_countdown)
+
+        else:
+            if not self.vote_stopped:  # ส่งข้อความ "หมดเวลาโหวตแล้ว!" ถ้ายังไม่ได้กด stop vote
+                self.send_twitch_message("หมดเวลาโหวตแล้ว!")
+            self.vote_running = False
+            self.finish_vote()  # Call finish_vote without sending result
+
+    def get_remaining_time(self):
+        return self.countdown
+
+    def finish_vote(self, result=None):
+        if result is None:
+            # แปลง dict เป็น list ของ tuple (user, choice)
+            result = list(self.votes.items())  # ใช้ items() ของ dict เพื่อแปลงเป็น tuple
+        self.finish_vote_callback(result)  # ส่งผลโหวตไปที่ finish_vote_callback
+        self.save_results_to_file(result)
+
+        # รีเซ็ทผลโหวตหลังจากจบ
+        self.votes.clear()
+        self.voted_users.clear()
+
+    def send_twitch_message(self, message):
+        loop = asyncio.get_event_loop()
+        if self.connected_channels:
+            asyncio.run_coroutine_threadsafe(self.connected_channels[0].send(message), loop)
+        else:
+            print("Cannot send a message because channel has not been connected yet!")
+
+    def save_results_to_file(self, result):
+        # This file generate user, choice, subscription sort by time
+        file_path = "vote_results.txt"
+        with open(file_path, "w", encoding="utf-8") as file:
+            for user, choice in result:  # รับผลโหวตในรูปแบบ tuple
+                subscription = self.get_subscription(user)
+                match subscription:
+                    case "1000":
+                        subscription = "T1"
+                    case "2000":
+                        subscription = "T2"
+                    case "3000":
+                        subscription = "T3"
+                    case "0000":
+                        subscription = "None"
+                file.write(f"{user},{choice},{subscription}\n")
+                if subscription != "None":
+                    file.write(f"{user},{choice},{subscription}\n")
+        print(f"Results saved to {file_path}")
+
+        # This file generate only username group by choice
+        file_path = "vote_results_choice_seperated.txt"
+        group_by_choice = {}
+        for user, choice in result:
+            if choice not in group_by_choice:
+                group_by_choice[choice] = []
+            group_by_choice[choice].append(user)
+            if self.get_subscription(user) != "0000":
+                group_by_choice[choice].append(user)
+        with open(file_path, "w", encoding="utf-8") as file:
+            for choice, users in group_by_choice.items():
+                file.write(f"------------- Choice: {choice} -------------\n")
+                file.write('\n'.join(users))
+                file.write('\n')
+            
+        print(f"Results saved to {file_path}")
+
+    def stop_vote(self):
+        self.vote_stopped = True  # Set flag to true when vote is manually stopped
+        self.countdown = 0
+        self.send_twitch_message("⏹️ โหวตถูกหยุดแล้ว!")
+        self.save_results_to_file(self.votes)  # Save the results when stop vote is clicked
+        self.finish_vote()  # Finish vote after stopping
+
+    def get_subscription(self, user):
+        if user in self.broadcaster_subscriptions_table:
+            return self.broadcaster_subscriptions_table[user]["tier"]
+        return "0000"
+
+class App:
+    def __init__(self, root):
+
+        # TODO: Make this to environment variables
+        client_id = "y8xpxp0qd5vrzx4yy7tnj71sxkokd1"
+        client_secret = "d96t22p7i41bjcrvli5mylw2rybpfq"
+        token_receiver_endpoint = "https://twitch-token.kanonkc.com"
+        
+        if not client_id or not client_secret or not token_receiver_endpoint:
+            messagebox.showerror("Error", "หากคุณเป็นผู้ใช้งานผละเห็นข้อความนี้ โปรดติดต่อ KanonKC\nกรุณาตั้งค่า TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET และ TWTICH_TOKEN_RECEIVER_ENDPOINT ในไฟล์ .env")
+            root.destroy()
+            return
+
+        self.twitch_auth = TwitchAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            token_receiver_endpoint=token_receiver_endpoint
+        )
+
+        self.helix = TwitchAPI(
+            client_id=client_id,
+            client_secret=client_secret,
+            access_token=""
+        )
+
+        self.root = root
+        self.root.title("Twitch Vote and Queue Bot")
+        self.root.configure(bg="#2e2e2e")
+
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("Treeview",
+                        background="#3c3f41",
+                        foreground="white",
+                        rowheight=25,
+                        fieldbackground="#3c3f41")
+        style.map('Treeview', background=[('selected', '#5a5a5a')])
+
+        # --- Top Frame (Input Form) ---
+        form_frame = tk.Frame(root, bg="#2e2e2e")
+        form_frame.pack(pady=10)
+
+        tk.Label(form_frame, text="Access Token:", fg="white", bg="#2e2e2e").grid(row=0, column=0, sticky="w")
+        self.token_entry = tk.Entry(form_frame, width=50, show='*')
+        self.token_entry.grid(row=0, column=1, padx=10, pady=5)
+
+        tk.Label(form_frame, text="Channel Name:", fg="white", bg="#2e2e2e").grid(row=1, column=0, sticky="w")
+        self.channel_entry = tk.Entry(form_frame, width=30)
+        self.channel_entry.grid(row=1, column=1, padx=10, pady=5)
+
+        tk.Label(form_frame, text="Vote Choices (comma separated):", fg="white", bg="#2e2e2e").grid(row=2, column=0, sticky="w")
+        self.choices_entry = tk.Entry(form_frame, width=30)
+        self.choices_entry.grid(row=2, column=1, padx=10, pady=5)
+
+        tk.Label(form_frame, text="Queue Keywords (comma separated):", fg="white", bg="#2e2e2e").grid(row=3, column=0, sticky="w")
+        self.queue_keywords_entry = tk.Entry(form_frame, width=30)
+        self.queue_keywords_entry.grid(row=3, column=1, padx=10, pady=5)
+
+        tk.Label(form_frame, text="Vote Time (seconds):", fg="white", bg="#2e2e2e").grid(row=4, column=0, sticky="w")
+        self.time_entry = tk.Entry(form_frame, width=10)
+        self.time_entry.grid(row=4, column=1, padx=10, pady=5, sticky="w")
+    
+        self.countdown_label = tk.Label(root, text="Countdown: 0", font=("Arial", 16), fg="white", bg="#2e2e2e")
+        self.countdown_label.pack(pady=10)
+
+        # --- Button Frame ---
+        button_frame = tk.Frame(root, bg="#2e2e2e")
+        button_frame.pack(pady=10)
+
+        self.connect_button = tk.Button(button_frame, text="Connect Bot", command=self.connect_bot, bg="#5a5a5a", fg="white")
+        self.connect_button.grid(row=0, column=0, padx=5)
+        
+        self.login_twitch_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#6441a5", fg="white")
+        self.login_twitch_button.grid(row=0, column=1, padx=5)
+
+        self.start_button = tk.Button(button_frame, text="Start Vote", command=self.start_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
+        self.start_button.grid(row=0, column=2, padx=5)
+
+        self.set_queue_button = tk.Button(button_frame, text="Set Queue Keywords", command=self.set_queue_keywords, state=tk.DISABLED, bg="#5a5a5a", fg="white")
+        self.set_queue_button.grid(row=0, column=3, padx=5)
+
+        self.stop_button = tk.Button(button_frame, text="Stop Vote", command=self.stop_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
+        self.stop_button.grid(row=0, column=4, padx=5)
+
+        # --- Vote Result Table ---
+        tk.Label(root, text="Vote Results", font=("Arial", 14), fg="white", bg="#2e2e2e").pack(pady=(20, 5))
+        self.result_table = ttk.Treeview(root, columns=("No", "Username","Subscription", "Choice"), show="headings")
+        # Heading
+        self.result_table.heading("No", text="No.")
+        self.result_table.heading("Username", text="Username")
+        self.result_table.heading("Subscription", text="Subscription")
+        self.result_table.heading("Choice", text="Choice")
+        # Column
+        self.result_table.column("No", width=50, anchor="center")
+        self.result_table.column("Username", width=150)
+        self.result_table.column("Subscription", width=50, anchor="center")
+        self.result_table.column("Choice", width=150)
+        self.result_table.pack(pady=5)
+
+        # --- Queue Section ---
+        tk.Label(root, text="Queue List", font=("Arial", 14), fg="white", bg="#2e2e2e").pack(pady=(20, 5))
+        self.queue_table = ttk.Treeview(root, columns=("No", "Username"), show="headings", height=10)
+        self.queue_table.heading("No", text="No.")
+        self.queue_table.heading("Username", text="Username")
+        self.queue_table.column("No", width=50, anchor="center")
+        self.queue_table.column("Username", width=150)
+        self.queue_table.pack(pady=5)
+
+        queue_button_frame = tk.Frame(root, bg="#2e2e2e")
+        queue_button_frame.pack(pady=10)
+
+        self.remove_button = tk.Button(queue_button_frame, text="Remove from Queue", command=self.remove_selected_from_queue, bg="#5a5a5a", fg="white")
+        self.remove_button.grid(row=0, column=0, padx=5)
+
+        self.clear_queue_button = tk.Button(queue_button_frame, text="Clear Queue", command=self.clear_queue, bg="#5a5a5a", fg="white")
+        self.clear_queue_button.grid(row=0, column=1, padx=5)
+
+        self.bot = None
+
+    def connect_bot(self):
+        token = self.token_entry.get()
+        channel = self.channel_entry.get()
+
+        if not token or not channel:
+            messagebox.showerror("Error", "Please enter the access token and channel name.")
+            return
+
+        self.setup_twitch_bot(token, channel)
+
+    def setup_twitch_bot(self, token, channel):
+        self.helix.set_access_token(token)
+        self.bot = TwitchVoteBot(
+            token=token,
+            channel=channel,
+            vote_choices=[],
+            queue_keywords=[],
+            duration=0,
+            root=self.root,
+            update_countdown_callback=self.update_countdown,
+            finish_vote_callback=self.finish_vote,
+            update_queue_callback=self.update_queue,
+            twitch_api=self.helix
+        )
+        self.bot.run_task = threading.Thread(target=self.run_bot)
+        self.bot.run_task.start()
+
+        # Enable buttons after the bot connects
+        self.connect_button.config(state=tk.DISABLED)
+        self.login_twitch_button.config(state=tk.DISABLED)
+        self.start_button.config(state=tk.NORMAL)
+        self.set_queue_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.NORMAL)
+
+        # ส่งข้อความเชื่อมต่อบอท
+        self.bot.send_twitch_message("🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
+
+    def login_to_twitch(self):
+        try:
+            # Try to load existing tokens
+            if self.twitch_auth.access_token and self.twitch_auth.validate_token():
+                print("✅ Using existing tokens")
+            else:
+                print("🔄 Requesting new tokens...")
+                login = self.twitch_auth.get_user_login_url()
+                state = login["state"]
+                webbrowser.open(login["url"])
+                
+                # Wait for confirmation
+                token_data = self.twitch_auth.poll_for_token_from_receiver(state)
+                token = token_data["access_token"]
+                response = self.helix.get_user_by_token(token)
+                channel = response['data'][0]['login']
+                self.setup_twitch_bot(token,channel)
+                # self.twitch_auth.save_tokens()
+                print("✅ Login successful!")
+                
+        except Exception as e:
+            print(f"❌ Login to Twitch failed: {str(e)}") 
+
+    def run_bot(self):
+        asyncio.run(self.bot.run())
+
+    def start_vote(self):
+        vote_choices = [c.strip().upper() for c in self.choices_entry.get().split(',') if c.strip()]
+        queue_keywords = [k.strip().upper() for k in self.queue_keywords_entry.get().split(',') if k.strip()]
+        try:
+            duration = int(self.time_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Vote time must be an integer.")
+            return
+
+        # Reset vote results table when starting new vote
+        for row in self.result_table.get_children():
+            self.result_table.delete(row)
+
+        self.bot.vote_choices = vote_choices
+        self.bot.queue_keywords = queue_keywords
+        self.bot.duration = duration
+        self.bot.start_countdown()
+
+        # ส่งข้อความเริ่มโหวต
+        self.bot.send_twitch_message(f"🚨 เริ่มโหวตแล้ว! พิมพ์ {', '.join(self.bot.vote_choices)} เพื่อเลือก มีเวลา {self.bot.duration} วินาที!")
+
+    def set_queue_keywords(self):
+        queue_keywords = [k.strip().upper() for k in self.queue_keywords_entry.get().split(',') if k.strip()]
+        self.bot.queue_keywords = queue_keywords
+        messagebox.showinfo("Success", "Queue keywords have been set.")
+
+    def stop_vote(self):
+        if self.bot and self.bot.vote_running:
+            self.bot.stop_vote()  # Call stop_vote from bot class to stop voting
+
+    def update_countdown(self, time_left):
+        self.countdown_label.config(text=f"Countdown: {time_left}")
+
+    def finish_vote(self, result):
+        self.result_table.delete(*self.result_table.get_children())
+        diff = 0
+        for idx, (user, choice) in enumerate(result, start=1):
+            subscription = self.bot.get_subscription(user)
+            match subscription:
+                case "1000":
+                    subscription = "Tier 1"
+                case "2000":
+                    subscription = "Tier 2"
+                case "3000":
+                    subscription = "Tier 3"
+                case "0000":
+                    subscription = "-"
+            self.result_table.insert("", "end", values=(idx + diff, user, subscription, choice))
+            if subscription != "-":
+                diff += 1
+                self.result_table.insert("", "end", values=(idx + diff, user, subscription, choice))
+
+    def update_queue(self, queue_list):
+        self.queue_table.delete(*self.queue_table.get_children())
+        for idx, user in enumerate(queue_list, start=1):
+            self.queue_table.insert("", "end", values=(idx, user))
+
+    def remove_selected_from_queue(self):
+        selected_items = self.queue_table.selection()
+        for item in selected_items:
+            user = self.queue_table.item(item, "values")[1]
+            self.bot.queue_list.remove(user)
+        self.update_queue(self.bot.queue_list)
+
+    def clear_queue(self):
+        self.bot.queue_list.clear()
+        self.update_queue(self.bot.queue_list)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
