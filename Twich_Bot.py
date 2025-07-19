@@ -5,9 +5,142 @@ from twitchio.ext import commands
 import asyncio
 import threading
 import requests
+import webbrowser
+import time
+import random
+
+def generate_random_string(length):
+    pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return ''.join(random.choices(pool, k=length))
+
+class TwitchAuth:
+    def __init__(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.auth_endpoint = "https://id.twitch.tv/oauth2"
+        self.api_endpoint = "https://api.twitch.tv/helix"
+        self.access_token = None
+        self.refresh_token = None
+        self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
+        self.redirect_uri = "https://twitch-token.kanonkc.com/callback"
+        self.token_receiver_endpoint = "https://twitch-token.kanonkc.com"
+
+    def get_user_login_url(self):
+        state = generate_random_string(16)
+        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={'%20'.join(self.scopes)}&state={state}"
+        return { "url": url, "state": state }
+        
+    def get_device_code(self):
+        """ขอ device code จาก Twitch"""
+        url = f"{self.auth_endpoint}/device"
+        data = {
+            "client_id": self.client_id,
+            "scope": "channel:read:subscriptions"
+        }
+        
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"ไม่สามารถขอ device code ได้: {response.text}")
+    
+    def poll_for_token_from_receiver(self, state, interval=5):
+        url = f"{self.token_receiver_endpoint}/token/{state}"
+        while True:
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                time.sleep(interval)
+
+    
+    def poll_for_token(self, device_code, interval=5):
+        """รอการยืนยันจากผู้ใช้และขอ access token"""
+        url = f"{self.auth_endpoint}/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }
+        
+        while True:
+            response = requests.post(url, data=data)
+            if response.status_code == 200:
+                token_data = response.json()
+                self.access_token = token_data["access_token"]
+                self.refresh_token = token_data.get("refresh_token")
+                return token_data
+            elif response.status_code == 400:
+                error_data = response.json()
+                if error_data.get("message") == "authorization_pending":
+                    time.sleep(interval)
+                    continue
+                elif error_data.get("message") == "authorization_declined":
+                    raise Exception("ผู้ใช้ปฏิเสธการอนุญาต")
+                elif error_data.get("message") == "expired_token":
+                    raise Exception("Device code หมดอายุแล้ว")
+                else:
+                    raise Exception(f"เกิดข้อผิดพลาด: {error_data}")
+            else:
+                raise Exception(f"ไม่สามารถขอ token ได้: {response.text}")
+    
+    def refresh_access_token(self):
+        """ใช้ refresh token เพื่อขอ access token ใหม่"""
+        if not self.refresh_token:
+            raise Exception("ไม่มี refresh token")
+            
+        url = f"{self.auth_endpoint}/token"
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "refresh_token": self.refresh_token,
+            "grant_type": "refresh_token"
+        }
+        
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            token_data = response.json()
+            self.access_token = token_data["access_token"]
+            self.refresh_token = token_data.get("refresh_token", self.refresh_token)
+            return token_data
+        else:
+            raise Exception(f"ไม่สามารถ refresh token ได้: {response.text}")
+    
+    # def save_tokens(self, filename="tokens.json"):
+    #     """บันทึก tokens ลงไฟล์"""
+    #     token_data = {
+    #         "access_token": self.access_token,
+    #         "refresh_token": self.refresh_token
+    #     }
+    #     with open(filename, "w") as f:
+    #         json.dump(token_data, f)
+    
+    # def load_tokens(self, filename="tokens.json"):
+    #     """โหลด tokens จากไฟล์"""
+    #     if os.path.exists(filename):
+    #         with open(filename, "r") as f:
+    #             token_data = json.load(f)
+    #             self.access_token = token_data.get("access_token")
+    #             self.refresh_token = token_data.get("refresh_token")
+    #             return True
+    #     return False
+    
+    def validate_token(self):
+        """ตรวจสอบว่า token ยังใช้งานได้หรือไม่"""
+        if not self.access_token:
+            return False
+            
+        url = f"{self.auth_endpoint}/validate"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        
+        response = requests.get(url, headers=headers)
+        return response.status_code == 200
 
 class TwitchAPI:
-    def __init__(self, client_id, client_secret, access_token):
+    def __init__(self, client_id="", client_secret="", access_token=""):
         self.client_id = client_id
         self.client_secret = client_secret
         self.access_token = access_token
@@ -29,6 +162,15 @@ class TwitchAPI:
         headers = {
             "Client-ID": self.client_id,
             "Authorization": f"Bearer {self.access_token}",
+        }
+        response = requests.get(url, headers=headers)
+        return response.json()
+    
+    def get_user_by_token(self, token):
+        url = f"{self.endpoint}/users"
+        headers = {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token}",
         }
         response = requests.get(url, headers=headers)
         return response.json()
@@ -55,8 +197,8 @@ class TwitchVoteBot(commands.Bot):
         self.vote_stopped = False  # Flag to track if voting was stopped manually
         self.broadcaster_subscriptions_table = {}
         self.helix = TwitchAPI(
-            client_id="gp762nuuoqcoxypju8c569th9wz7q5",
-            client_secret="abslv2nydym6w2i1kf8db8ug8od4kt",
+            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
+            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
             access_token=token
         )
         self.channel_id = ""
@@ -75,7 +217,7 @@ class TwitchVoteBot(commands.Bot):
                 cursor = None
                 while cursor or first_time:
                     broadcaster_sub_res = self.helix.get_broadcaster_subscriptions(self.channel_id, cursor)
-                    print('broadcaster_sub_res',broadcaster_sub_res)
+                    # print('broadcaster_sub_res',broadcaster_sub_res)
                     for sub in broadcaster_sub_res["data"]:
                         self.broadcaster_subscriptions_table[sub["user_login"]] = sub
                     if "cursor" in broadcaster_sub_res["pagination"]:
@@ -83,7 +225,7 @@ class TwitchVoteBot(commands.Bot):
                     else:
                         cursor = None
                     first_time = False
-                    print('cursor',cursor, first_time)
+                    # print('cursor',cursor, first_time)
             except Exception as e:
                 print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
 
@@ -217,6 +359,18 @@ class TwitchVoteBot(commands.Bot):
 
 class App:
     def __init__(self, root):
+
+        self.twitch_auth = TwitchAuth(
+            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
+            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq"
+        )
+
+        self.helix = TwitchAPI(
+            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
+            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
+            access_token=""
+        )
+
         self.root = root
         self.root.title("Twitch Vote and Queue Bot")
         self.root.configure(bg="#2e2e2e")
@@ -263,15 +417,18 @@ class App:
 
         self.connect_button = tk.Button(button_frame, text="Connect Bot", command=self.connect_bot, bg="#5a5a5a", fg="white")
         self.connect_button.grid(row=0, column=0, padx=5)
+        
+        self.login_twitch_button = tk.Button(button_frame, text="Login to Twitch", command=self.login_to_twitch, bg="#6441a5", fg="white")
+        self.login_twitch_button.grid(row=0, column=1, padx=5)
 
         self.start_button = tk.Button(button_frame, text="Start Vote", command=self.start_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
-        self.start_button.grid(row=0, column=1, padx=5)
+        self.start_button.grid(row=0, column=2, padx=5)
 
         self.set_queue_button = tk.Button(button_frame, text="Set Queue Keywords", command=self.set_queue_keywords, state=tk.DISABLED, bg="#5a5a5a", fg="white")
-        self.set_queue_button.grid(row=0, column=2, padx=5)
+        self.set_queue_button.grid(row=0, column=3, padx=5)
 
         self.stop_button = tk.Button(button_frame, text="Stop Vote", command=self.stop_vote, state=tk.DISABLED, bg="#5a5a5a", fg="white")
-        self.stop_button.grid(row=0, column=3, padx=5)
+        self.stop_button.grid(row=0, column=4, padx=5)
 
         # --- Vote Result Table ---
         tk.Label(root, text="Vote Results", font=("Arial", 14), fg="white", bg="#2e2e2e").pack(pady=(20, 5))
@@ -316,6 +473,9 @@ class App:
             messagebox.showerror("Error", "Please enter the access token and channel name.")
             return
 
+        self.setup_twitch_bot(token, channel)
+
+    def setup_twitch_bot(self, token, channel):
         self.bot = TwitchVoteBot(
             token=token,
             channel=channel,
@@ -332,12 +492,39 @@ class App:
 
         # Enable buttons after the bot connects
         self.connect_button.config(state=tk.DISABLED)
+        self.login_twitch_button.config(state=tk.DISABLED)
         self.start_button.config(state=tk.NORMAL)
         self.set_queue_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
 
         # ส่งข้อความเชื่อมต่อบอท
         self.bot.send_twitch_message("🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
+
+    def login_to_twitch(self):
+        try:
+            # ลองโหลด tokens ที่มีอยู่
+            if self.twitch_auth.access_token and self.twitch_auth.validate_token():
+                print("✅ ใช้ tokens ที่มีอยู่แล้ว")
+            else:
+                print("🔄 ขอ tokens ใหม่...")
+                # device_data = self.twitch_auth.get_device_code()
+                # print(f"รหัสยืนยัน: {device_data['user_code']}")
+                # print(f"เว็บไซต์: {device_data['verification_uri']}")
+                login = self.twitch_auth.get_user_login_url()
+                state = login["state"]
+                webbrowser.open(login["url"])
+                
+                # รอการยืนยัน
+                token_data = self.twitch_auth.poll_for_token_from_receiver(state)
+                token = token_data["access_token"]
+                response = self.helix.get_user_by_token(token)
+                channel = response['data'][0]['login']
+                self.setup_twitch_bot(token,channel)
+                # self.twitch_auth.save_tokens()
+                print("✅ ล็อกอินสำเร็จแล้ว!")
+                
+        except Exception as e:
+            print(f"❌ Login to Twitch failed: {str(e)}") 
 
     def run_bot(self):
         asyncio.run(self.bot.run())
