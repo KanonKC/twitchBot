@@ -99,33 +99,30 @@ class TwitchAPI:
         self.client_secret = client_secret
         self.access_token = access_token
         self.endpoint = "https://api.twitch.tv/helix"
+
+    def get_headers(self, token=""):
+        return {
+            "Client-ID": self.client_id,
+            "Authorization": f"Bearer {token if token else self.access_token}",
+        }
     
     def get_broadcaster_subscriptions(self, broadcaster_id, cursor=None):
         url = f"{self.endpoint}/subscriptions?broadcaster_id={broadcaster_id}&first=100"
         if cursor:
             url += f"&after={cursor}"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {self.access_token}",
-        }
+        headers = self.get_headers()
         response = requests.get(url, headers=headers)
         return response.json()
         
     def get_user(self, login):
         url = f"{self.endpoint}/users?login={login}"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {self.access_token}",
-        }
+        headers = self.get_headers()
         response = requests.get(url, headers=headers)
         return response.json()
     
     def get_user_by_token(self, token):
         url = f"{self.endpoint}/users"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {token}",
-        }
+        headers = self.get_headers(token)
         response = requests.get(url, headers=headers)
         return response.json()
 
