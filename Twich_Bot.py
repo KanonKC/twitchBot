@@ -10,13 +10,17 @@ import time
 import random
 import json
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 def generate_random_string(length):
     pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return ''.join(random.choices(pool, k=length))
 
 class TwitchAuth:
-    def __init__(self, client_id, client_secret):
+    def __init__(self, client_id, client_secret, token_receiver_endpoint):
         self.client_id = client_id
         self.client_secret = client_secret
         self.auth_endpoint = "https://id.twitch.tv/oauth2"
@@ -24,12 +28,11 @@ class TwitchAuth:
         self.access_token = None
         self.refresh_token = None
         self.scopes = ["channel:read:subscriptions","chat:read","chat:edit"]
-        self.redirect_uri = "https://twitch-token.kanonkc.com/callback"
-        self.token_receiver_endpoint = "https://twitch-token.kanonkc.com"
+        self.token_receiver_endpoint = token_receiver_endpoint
 
     def get_user_login_url(self):
         state = generate_random_string(16)
-        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.redirect_uri}&scope={'%20'.join(self.scopes)}&state={state}"
+        url = f"{self.auth_endpoint}/authorize?response_type=code&client_id={self.client_id}&redirect_uri={self.token_receiver_endpoint}/callback&scope={'%20'.join(self.scopes)}&state={state}"
         return { "url": url, "state": state }
     
     def poll_for_token_from_receiver(self, state, interval=5):
@@ -309,14 +312,25 @@ class TwitchVoteBot(commands.Bot):
 class App:
     def __init__(self, root):
 
+        # อ่านค่าจาก environment variables
+        client_id = os.getenv('TWITCH_CLIENT_ID')
+        client_secret = os.getenv('TWITCH_CLIENT_SECRET')
+        token_receiver_endpoint = os.getenv('TWTICH_TOKEN_RECEIVER_ENDPOINT')
+        
+        if not client_id or not client_secret or not token_receiver_endpoint:
+            messagebox.showerror("Error", "หากคุณเป็นผู้ใช้งานผละเห็นข้อความนี้ โปรดติดต่อ KanonKC\nกรุณาตั้งค่า TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET และ TWTICH_TOKEN_RECEIVER_ENDPOINT ในไฟล์ .env")
+            root.destroy()
+            return
+
         self.twitch_auth = TwitchAuth(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq"
+            client_id=client_id,
+            client_secret=client_secret,
+            token_receiver_endpoint=token_receiver_endpoint
         )
 
         self.helix = TwitchAPI(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
+            client_id=client_id,
+            client_secret=client_secret,
             access_token=""
         )
 
