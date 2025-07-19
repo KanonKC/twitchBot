@@ -43,9 +43,8 @@ class TwitchAuth:
 
     # TODO: Implement refresh access token flow
     def refresh_access_token(self):
-        """ใช้ refresh token เพื่อขอ access token ใหม่"""
         if not self.refresh_token:
-            raise Exception("ไม่มี refresh token")
+            raise Exception("No refresh token")
             
         url = f"{self.auth_endpoint}/token"
         data = {
@@ -62,7 +61,7 @@ class TwitchAuth:
             self.refresh_token = token_data.get("refresh_token", self.refresh_token)
             return token_data
         else:
-            raise Exception(f"ไม่สามารถ refresh token ได้: {response.text}")
+            raise Exception(f"Cannot refresh token: {response.text}")
     
     def save_tokens(self, filename="tokens.json"):
         token_data = {
@@ -154,13 +153,13 @@ class TwitchVoteBot(commands.Bot):
         self.channel_id = ""
 
     async def event_ready(self):
-        print(f'Logged in as | {self.nick} ({self.connected_channels[0]})')
+        
         if self.connected_channels:
             try:
                 user_res = self.helix.get_user(self.connected_channels[0].name)
                 self.channel_id = user_res["data"][0]["id"]
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลช่องของคุณได้", e)
+                print("Cannot retrieve your channel data", e)
 
             try:
                 first_time = True
@@ -177,12 +176,12 @@ class TwitchVoteBot(commands.Bot):
                     first_time = False
                     # print('cursor',cursor, first_time)
             except Exception as e:
-                print("ไม่สามารถดึงข้อมูลสมาชิกช่องของคุณได้", e)
+                print("Cannot retrieve your channel subscribers data", e)
 
             await self.connected_channels[0].send(f"🔐 คอมพี่มาสถูกล็อคเเล้ว กรุณาติดต่อเพื่อปลดล็อค!")
-            print("✅ พร้อมใช้งาน")
+            print(f"✅ Ready to go! Logged in as | {self.nick} ({self.connected_channels[0]})")
         else:
-            print("ยังไม่ได้เชื่อมต่อกับช่อง!")
+            print("Channel has not been connected yet!")
 
     async def event_message(self, message):
         if message.echo:
@@ -224,7 +223,7 @@ class TwitchVoteBot(commands.Bot):
         if self.countdown > 0:
             self.countdown -= 1
             self.update_countdown_callback(self.get_remaining_time())
-            print(f"เวลาถอยหลัง: {self.countdown} วินาที")
+            # print(f"Countdown: {self.countdown} seconds")
 
             if self.countdown == 10:
                 self.root.after(0, self.send_twitch_message, f"⏳ เหลือเวลา 10 วินาที!")
@@ -235,7 +234,7 @@ class TwitchVoteBot(commands.Bot):
             if not self.vote_stopped:  # ส่งข้อความ "หมดเวลาโหวตแล้ว!" ถ้ายังไม่ได้กด stop vote
                 self.send_twitch_message("หมดเวลาโหวตแล้ว!")
             self.vote_running = False
-            self.finish_vote()  # เรียก finish_vote โดยไม่ส่ง result
+            self.finish_vote()  # Call finish_vote without sending result
 
     def get_remaining_time(self):
         return self.countdown
@@ -256,7 +255,7 @@ class TwitchVoteBot(commands.Bot):
         if self.connected_channels:
             asyncio.run_coroutine_threadsafe(self.connected_channels[0].send(message), loop)
         else:
-            print("ไม่สามารถส่งข้อความได้ เนื่องจากยังไม่มีการเชื่อมต่อกับช่อง")
+            print("Cannot send a message because channel has not been connected yet!")
 
     def save_results_to_file(self, result):
         # This file generate user, choice, subscription sort by time
@@ -454,23 +453,23 @@ class App:
 
     def login_to_twitch(self):
         try:
-            # ลองโหลด tokens ที่มีอยู่
+            # Try to load existing tokens
             if self.twitch_auth.access_token and self.twitch_auth.validate_token():
-                print("✅ ใช้ tokens ที่มีอยู่แล้ว")
+                print("✅ Using existing tokens")
             else:
-                print("🔄 ขอ tokens ใหม่...")
+                print("🔄 Requesting new tokens...")
                 login = self.twitch_auth.get_user_login_url()
                 state = login["state"]
                 webbrowser.open(login["url"])
                 
-                # รอการยืนยัน
+                # Wait for confirmation
                 token_data = self.twitch_auth.poll_for_token_from_receiver(state)
                 token = token_data["access_token"]
                 response = self.helix.get_user_by_token(token)
                 channel = response['data'][0]['login']
                 self.setup_twitch_bot(token,channel)
                 # self.twitch_auth.save_tokens()
-                print("✅ ล็อกอินสำเร็จแล้ว!")
+                print("✅ Login successful!")
                 
         except Exception as e:
             print(f"❌ Login to Twitch failed: {str(e)}") 
@@ -487,7 +486,7 @@ class App:
             messagebox.showerror("Error", "Vote time must be an integer.")
             return
 
-        # รีเซ็ทตารางผลโหวตเมื่อเริ่มโหวตใหม่
+        # Reset vote results table when starting new vote
         for row in self.result_table.get_children():
             self.result_table.delete(row)
 
