@@ -100,6 +100,9 @@ class TwitchAPI:
         self.access_token = access_token
         self.endpoint = "https://api.twitch.tv/helix"
 
+    def set_access_token(self, access_token):
+        self.access_token = access_token
+
     def get_headers(self, token=""):
         return {
             "Client-ID": self.client_id,
@@ -127,7 +130,7 @@ class TwitchAPI:
         return response.json()
 
 class TwitchVoteBot(commands.Bot):
-    def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback):
+    def __init__(self, token, channel, vote_choices, queue_keywords, duration, root, update_countdown_callback, finish_vote_callback, update_queue_callback,twitch_api):
         super().__init__(
             token=token,
             prefix='!',
@@ -147,11 +150,7 @@ class TwitchVoteBot(commands.Bot):
         self.queue_list = []
         self.vote_stopped = False  # Flag to track if voting was stopped manually
         self.broadcaster_subscriptions_table = {}
-        self.helix = TwitchAPI(
-            client_id="y8xpxp0qd5vrzx4yy7tnj71sxkokd1",
-            client_secret="d96t22p7i41bjcrvli5mylw2rybpfq",
-            access_token=token
-        )
+        self.helix = twitch_api
         self.channel_id = ""
 
     async def event_ready(self):
@@ -427,6 +426,7 @@ class App:
         self.setup_twitch_bot(token, channel)
 
     def setup_twitch_bot(self, token, channel):
+        self.helix.set_access_token(token)
         self.bot = TwitchVoteBot(
             token=token,
             channel=channel,
@@ -436,7 +436,8 @@ class App:
             root=self.root,
             update_countdown_callback=self.update_countdown,
             finish_vote_callback=self.finish_vote,
-            update_queue_callback=self.update_queue
+            update_queue_callback=self.update_queue,
+            twitch_api=self.helix
         )
         self.bot.run_task = threading.Thread(target=self.run_bot)
         self.bot.run_task.start()
