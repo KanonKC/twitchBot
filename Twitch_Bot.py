@@ -10,10 +10,6 @@ import time
 import random
 import json
 import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 def generate_random_string(length):
     pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -312,10 +308,10 @@ class TwitchVoteBot(commands.Bot):
 class App:
     def __init__(self, root):
 
-        # อ่านค่าจาก environment variables
-        client_id = os.getenv('TWITCH_CLIENT_ID')
-        client_secret = os.getenv('TWITCH_CLIENT_SECRET')
-        token_receiver_endpoint = os.getenv('TWTICH_TOKEN_RECEIVER_ENDPOINT')
+        # TODO: Make this to environment variables
+        client_id = "y8xpxp0qd5vrzx4yy7tnj71sxkokd1"
+        client_secret = "d96t22p7i41bjcrvli5mylw2rybpfq"
+        token_receiver_endpoint = "https://twitch-token.kanonkc.com"
         
         if not client_id or not client_secret or not token_receiver_endpoint:
             messagebox.showerror("Error", "หากคุณเป็นผู้ใช้งานผละเห็นข้อความนี้ โปรดติดต่อ KanonKC\nกรุณาตั้งค่า TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET และ TWTICH_TOKEN_RECEIVER_ENDPOINT ในไฟล์ .env")
